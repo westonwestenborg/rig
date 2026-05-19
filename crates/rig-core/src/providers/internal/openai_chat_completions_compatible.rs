@@ -32,6 +32,11 @@ pub(crate) struct CompatibleToolCallChunk {
     pub(crate) id: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) arguments: Option<String>,
+    // Opaque provider-specific blob (e.g. Google's
+    // `extra_content.google.thought_signature` on the Gemini OpenAI-compat
+    // endpoint). Carried through the streaming accumulator into the canonical
+    // ToolCall's `additional_params` so it can be echoed back next turn.
+    pub(crate) extra_content: Option<serde_json::Value>,
 }
 
 impl CompatibleToolCallChunk {
@@ -265,6 +270,11 @@ where
                             && !id.is_empty()
                         {
                             existing_tool_call.id = id.clone();
+                        }
+
+                        if let Some(extra_content) = incoming.extra_content.as_ref() {
+                            existing_tool_call.additional_params =
+                                Some(extra_content.clone());
                         }
 
                         if let Some(name) = incoming.name.as_ref()

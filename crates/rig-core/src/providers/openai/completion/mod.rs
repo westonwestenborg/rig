@@ -362,6 +362,15 @@ pub struct ToolCall {
     #[serde(default)]
     pub r#type: ToolType,
     pub function: Function,
+    /// Provider-specific extension blob.
+    ///
+    /// On Google's Gemini OpenAI-compat endpoint this carries
+    /// `{"google": {"thought_signature": "..."}}` for Gemini 3.x tool calls;
+    /// the signature must be echoed back in subsequent requests for tool
+    /// calling to work across turns. Real OpenAI never populates this field,
+    /// so the default-None case is correct there too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<serde_json::Value>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -719,6 +728,7 @@ impl From<message::ToolCall> for ToolCall {
                 name: tool_call.function.name,
                 arguments: tool_call.function.arguments,
             },
+            extra_content: tool_call.additional_params,
         }
     }
 }
@@ -733,7 +743,7 @@ impl From<ToolCall> for message::ToolCall {
                 arguments: tool_call.function.arguments,
             },
             signature: None,
-            additional_params: None,
+            additional_params: tool_call.extra_content,
         }
     }
 }
@@ -2229,5 +2239,38 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert!(matches!(parts[0], UserContent::Text { .. }));
         assert!(matches!(parts[1], UserContent::File { .. }));
+    }
+
+    /// Gemini 3.x requires the `extra_content.google.thought_signature` from
+    /// a tool_call response to be echoed back on the next request. Canonical
+    /// `ToolCall.additional_params` carries it through the agent loop; the
+    /// `From` impl into the openai-wire `ToolCall` must populate
+    /// `extra_content` so the wire body actually contains it.
+    #[test]
+    fn assistant_tool_call_round_trips_extra_content_into_wire_body() {
+        let signature_blob =
+            serde_json::json!({ "google": { "thought_signature": "EssJCsgJAQw51sf==" } });
+
+        let assistant = message::Message::Assistant {
+            id: None,
+            content: OneOrMany::one(message::AssistantContent::ToolCall(message::ToolCall {
+                id: "call_abc".to_string(),
+                call_id: None,
+                function: message::ToolFunction {
+                    name: "use_skill".to_string(),
+                    arguments: serde_json::json!({"skill": "search"}),
+                },
+                signature: None,
+                additional_params: Some(signature_blob.clone()),
+            })),
+        };
+
+        let converted: Vec<Message> =
+            assistant.try_into().expect("conversion should succeed");
+        let serialized = serde_json::to_value(&converted).expect("serialization should succeed");
+
+        let body = &serialized[0]["tool_calls"][0];
+        assert_eq!(body["id"], "call_abc");
+        assert_eq!(body["extra_content"], signature_blob);
     }
 }

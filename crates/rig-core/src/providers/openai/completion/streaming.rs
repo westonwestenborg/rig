@@ -31,6 +31,13 @@ pub(crate) struct StreamingToolCall {
     pub(crate) index: usize,
     pub(crate) id: Option<String>,
     pub(crate) function: StreamingFunction,
+    // Google's OpenAI-compat endpoint nests provider-specific tool_call metadata
+    // (e.g. `extra_content.google.thought_signature`) here. Preserve the whole
+    // blob so we can echo it back on the next turn — Gemini 3.x requires the
+    // signature to be present for tool calls to work across turns. Real OpenAI
+    // never emits this field, so the default-None case is correct there too.
+    #[serde(default)]
+    pub(crate) extra_content: Option<serde_json::Value>,
 }
 
 impl From<&StreamingToolCall> for CompatibleToolCallChunk {
@@ -40,6 +47,7 @@ impl From<&StreamingToolCall> for CompatibleToolCallChunk {
             id: value.id.clone(),
             name: value.function.name.clone(),
             arguments: value.function.arguments.clone(),
+            extra_content: value.extra_content.clone(),
         }
     }
 }
@@ -254,6 +262,33 @@ mod tests {
         assert_eq!(tool_call.index, 0);
         assert_eq!(tool_call.id, Some("call_abc123".to_string()));
         assert_eq!(tool_call.function.name, Some("get_weather".to_string()));
+        assert!(tool_call.extra_content.is_none());
+    }
+
+    /// Google's Gemini OpenAI-compat endpoint nests provider-specific metadata
+    /// under `extra_content` on streaming tool_call chunks. We must preserve
+    /// the entire blob unchanged so it can be echoed back next turn (Gemini 3.x
+    /// rejects subsequent requests where the assistant's tool_call is missing
+    /// `extra_content.google.thought_signature`).
+    #[test]
+    fn test_streaming_tool_call_captures_extra_content() {
+        let json = r#"{
+            "index": 0,
+            "id": "call_abc123",
+            "function": {
+                "name": "use_skill",
+                "arguments": "{}"
+            },
+            "extra_content": {
+                "google": {"thought_signature": "EssJCsgJAQw51sfABCDEF=="}
+            }
+        }"#;
+        let tool_call: StreamingToolCall = serde_json::from_str(json).unwrap();
+        let extra = tool_call.extra_content.expect("extra_content captured");
+        assert_eq!(
+            extra["google"]["thought_signature"].as_str().unwrap(),
+            "EssJCsgJAQw51sfABCDEF=="
+        );
     }
 
     #[test]
@@ -665,5 +700,52 @@ mod tests {
             .unwrap();
 
         assert_zero_arg_tool_call_is_emitted(stream, "call_123", "ping", true).await;
+    }
+
+    /// End-to-end: a Gemini OpenAI-compat tool_call chunk carrying
+    /// `extra_content.google.thought_signature` must propagate through the
+    /// streaming accumulator into the final `ToolCall.additional_params`.
+    /// Without this, the next turn loses the signature and Google returns 400.
+    #[tokio::test]
+    async fn test_extra_content_round_trips_through_streaming_accumulator() {
+        use crate::test_utils::MockStreamingClient;
+        use futures::StreamExt;
+
+        let client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_abc\",\"function\":{\"name\":\"use_skill\",\"arguments\":\"{}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"EssJCsgJAQw51sf==\"}}}]},\"finish_reason\":null}],\"usage\":null}",
+                "{\"choices\":[{\"delta\":{\"tool_calls\":[]},\"finish_reason\":\"tool_calls\"}],\"usage\":null}",
+                "[DONE]",
+            ]),
+        };
+
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("http://localhost/v1/chat/completions")
+            .body(Vec::new())
+            .unwrap();
+
+        let mut stream = send_compatible_streaming_request(client, req)
+            .await
+            .unwrap();
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            if let streaming::StreamedAssistantContent::ToolCall { tool_call, .. } =
+                chunk.unwrap()
+            {
+                collected.push(tool_call);
+            }
+        }
+
+        assert_eq!(collected.len(), 1, "expected one finalized tool call");
+        let additional = collected[0]
+            .additional_params
+            .as_ref()
+            .expect("additional_params populated from extra_content");
+        assert_eq!(
+            additional["google"]["thought_signature"].as_str().unwrap(),
+            "EssJCsgJAQw51sf=="
+        );
     }
 }

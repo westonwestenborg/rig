@@ -1397,6 +1397,7 @@ impl From<&ChatStreamingToolCall> for CompatibleToolCallChunk {
             id: value.id.clone(),
             name: value.function.name.clone(),
             arguments: value.function.arguments.clone(),
+            extra_content: None,
         }
     }
 }

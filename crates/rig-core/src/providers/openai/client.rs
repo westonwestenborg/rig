@@ -439,6 +439,7 @@ mod tests {
                             name: "subtract".to_string(),
                             arguments: serde_json::json!({"x": 2, "y": 5}),
                         },
+                        extra_content: None,
                     }
                 );
             }

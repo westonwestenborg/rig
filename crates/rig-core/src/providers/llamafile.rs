@@ -855,6 +855,7 @@ mod tests {
                     name: "weather".into(),
                     arguments: serde_json::json!({"city": "London"}),
                 },
+                extra_content: None,
             }],
         };
 
