@@ -24,6 +24,10 @@ pub(crate) struct StreamingFunction {
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct StreamingToolCall {
+    // Google's OpenAI-compat endpoint omits `index` on tool_call deltas;
+    // default to 0 so a single tool call still parses. Multi-call parallel
+    // streams from real OpenAI continue to set this explicitly.
+    #[serde(default)]
     pub(crate) index: usize,
     pub(crate) id: Option<String>,
     pub(crate) function: StreamingFunction,
